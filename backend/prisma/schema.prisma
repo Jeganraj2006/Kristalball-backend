@@ -1,0 +1,366 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ScopeMode {
+  LOCATION
+  ORGANIZATION
+}
+
+enum TrackingType {
+  BULK
+  SERIALIZED
+}
+
+enum TransferStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  DISPATCHED
+  RECEIVED
+  DISCREPANCY
+  CANCELLED
+}
+
+enum TransferEventType {
+  CREATED
+  SUBMITTED
+  APPROVED
+  REJECTED
+  DISPATCHED
+  RECEIVED
+  DISCREPANCY_RECORDED
+  COMPLETED
+  CANCELLED
+}
+
+enum InventoryMovementType {
+  TRANSFER_OUT
+  TRANSFER_IN
+  RECONCILIATION_ADJUSTMENT
+}
+
+enum StocktakeStatus {
+  DRAFT
+  COUNTING
+  SUBMITTED
+  APPROVED
+  REJECTED
+  POSTED
+  CANCELLED
+}
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  users     User[]
+  locations Location[]
+  catalogItems CatalogItem[]
+  balances InventoryBalance[]
+  ledgerEntries InventoryLedgerEntry[]
+  transfers TransferRequest[]
+  stocktakes Stocktake[]
+
+  @@map("organizations")
+}
+
+model Location {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @map("organization_id") @db.Uuid
+  parentId       String?         @map("parent_id") @db.Uuid
+  code           String
+  name           String
+  organization   Organization    @relation(fields: [organizationId], references: [id])
+  parent         Location?       @relation("LocationTree", fields: [parentId], references: [id])
+  children       Location[]      @relation("LocationTree")
+  grants         LocationGrant[]
+  sourceTransfers TransferRequest[] @relation("TransferSource")
+  destinationTransfers TransferRequest[] @relation("TransferDestination")
+  balances InventoryBalance[]
+  ledgerEntries InventoryLedgerEntry[]
+  stocktakes Stocktake[]
+
+  @@unique([organizationId, code])
+  @@map("locations")
+}
+
+model User {
+  id              String           @id @default(uuid()) @db.Uuid
+  organizationId  String           @map("organization_id") @db.Uuid
+  email           String
+  passwordHash    String           @map("password_hash")
+  status          UserStatus       @default(ACTIVE)
+  sessionVersion  Int              @default(1) @map("session_version")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  roles           UserRole[]
+  locationGrants  LocationGrant[]
+  refreshSessions RefreshSession[]
+  securityEvents  SecurityAuditEvent[]
+  requestedTransfers TransferRequest[] @relation("TransferRequester")
+  transferEvents TransferEvent[] @relation("TransferActor")
+  stocktakes Stocktake[] @relation("StocktakeCounter")
+  stocktakeEvents StocktakeEvent[] @relation("StocktakeActor")
+
+  @@unique([organizationId, email])
+  @@index([email])
+  @@map("users")
+}
+
+model CatalogItem {
+  id String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  sku String
+  name String
+  trackingType TrackingType @map("tracking_type")
+  active Boolean @default(true)
+  organization Organization @relation(fields: [organizationId], references: [id])
+  balances InventoryBalance[]
+  ledgerEntries InventoryLedgerEntry[]
+  transferLines TransferLine[]
+  stocktakeLines StocktakeLine[]
+  @@unique([organizationId, sku])
+  @@map("catalog_items")
+}
+
+model InventoryBalance {
+  id String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  locationId String @map("location_id") @db.Uuid
+  catalogItemId String @map("catalog_item_id") @db.Uuid
+  onHand Int @default(0) @map("on_hand")
+  allocated Int @default(0)
+  version Int @default(1)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization Organization @relation(fields: [organizationId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id])
+  @@unique([organizationId, locationId, catalogItemId])
+  @@map("inventory_balances")
+}
+
+model TransferRequest {
+  id String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  sourceLocationId String @map("source_location_id") @db.Uuid
+  destinationLocationId String @map("destination_location_id") @db.Uuid
+  requesterId String @map("requester_id") @db.Uuid
+  status TransferStatus @default(DRAFT)
+  version Int @default(1)
+  idempotencyKey String @unique @map("idempotency_key")
+  requestHash String @map("request_hash")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization Organization @relation(fields: [organizationId], references: [id])
+  sourceLocation Location @relation("TransferSource", fields: [sourceLocationId], references: [id])
+  destinationLocation Location @relation("TransferDestination", fields: [destinationLocationId], references: [id])
+  requester User @relation("TransferRequester", fields: [requesterId], references: [id])
+  lines TransferLine[]
+  events TransferEvent[]
+  @@index([organizationId, sourceLocationId, status])
+  @@map("transfer_requests")
+}
+
+model TransferLine {
+  id String @id @default(uuid()) @db.Uuid
+  transferId String @map("transfer_id") @db.Uuid
+  catalogItemId String @map("catalog_item_id") @db.Uuid
+  requestedQuantity Int @map("requested_quantity")
+  dispatchedQuantity Int @default(0) @map("dispatched_quantity")
+  receivedQuantity Int @default(0) @map("received_quantity")
+  transfer TransferRequest @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id])
+  ledgerEntries InventoryLedgerEntry[]
+  @@unique([transferId, catalogItemId])
+  @@map("transfer_lines")
+}
+
+model TransferEvent {
+  id String @id @default(uuid()) @db.Uuid
+  transferId String @map("transfer_id") @db.Uuid
+  type TransferEventType
+  fromStatus TransferStatus? @map("from_status")
+  toStatus TransferStatus @map("to_status")
+  actorId String @map("actor_id") @db.Uuid
+  idempotencyKey String? @unique @map("idempotency_key")
+  requestHash String? @map("request_hash")
+  reason String?
+  payload Json?
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  transfer TransferRequest @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  actor User @relation("TransferActor", fields: [actorId], references: [id])
+  @@index([transferId, occurredAt])
+  @@map("transfer_events")
+}
+
+model InventoryLedgerEntry {
+  id String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  transferId String? @map("transfer_id") @db.Uuid
+  transferLineId String? @map("transfer_line_id") @db.Uuid
+  stocktakeLineId String? @map("stocktake_line_id") @db.Uuid
+  catalogItemId String @map("catalog_item_id") @db.Uuid
+  locationId String @map("location_id") @db.Uuid
+  movementType InventoryMovementType @map("movement_type")
+  onHandDelta Int @map("on_hand_delta")
+  actorId String @map("actor_id") @db.Uuid
+  effectiveAt DateTime @default(now()) @map("effective_at") @db.Timestamptz(6)
+  postedAt DateTime @default(now()) @map("posted_at") @db.Timestamptz(6)
+  organization Organization @relation(fields: [organizationId], references: [id])
+  transferLine TransferLine? @relation(fields: [transferLineId], references: [id], onDelete: Restrict)
+  stocktakeLine StocktakeLine? @relation(fields: [stocktakeLineId], references: [id], onDelete: Restrict)
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+  @@index([organizationId, locationId, catalogItemId, effectiveAt])
+  @@map("inventory_ledger_entries")
+}
+
+model Stocktake {
+  id String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  locationId String @map("location_id") @db.Uuid
+  counterId String @map("counter_id") @db.Uuid
+  status StocktakeStatus @default(DRAFT)
+  version Int @default(1)
+  idempotencyKey String @unique @map("idempotency_key")
+  requestHash String @map("request_hash")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  submittedAt DateTime? @map("submitted_at") @db.Timestamptz(6)
+  organization Organization @relation(fields: [organizationId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+  counter User @relation("StocktakeCounter", fields: [counterId], references: [id])
+  lines StocktakeLine[]
+  events StocktakeEvent[]
+  @@index([organizationId, locationId, status])
+  @@map("stocktakes")
+}
+
+model StocktakeLine {
+  id String @id @default(uuid()) @db.Uuid
+  stocktakeId String @map("stocktake_id") @db.Uuid
+  catalogItemId String @map("catalog_item_id") @db.Uuid
+  expectedQuantity Int @map("expected_quantity")
+  actualQuantity Int? @map("actual_quantity")
+  variance Int?
+  category String? @map("discrepancy_category")
+  notes String?
+  stocktake Stocktake @relation(fields: [stocktakeId], references: [id], onDelete: Restrict)
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id])
+  ledgerEntries InventoryLedgerEntry[]
+  @@unique([stocktakeId, catalogItemId])
+  @@map("stocktake_lines")
+}
+
+model StocktakeEvent {
+  id String @id @default(uuid()) @db.Uuid
+  stocktakeId String @map("stocktake_id") @db.Uuid
+  type String
+  fromStatus StocktakeStatus? @map("from_status")
+  toStatus StocktakeStatus @map("to_status")
+  actorId String @map("actor_id") @db.Uuid
+  idempotencyKey String? @unique @map("idempotency_key")
+  requestHash String? @map("request_hash")
+  reason String?
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  stocktake Stocktake @relation(fields: [stocktakeId], references: [id], onDelete: Restrict)
+  actor User @relation("StocktakeActor", fields: [actorId], references: [id])
+  @@index([stocktakeId, occurredAt])
+  @@map("stocktake_events")
+}
+
+model Role {
+  id          String           @id @default(uuid()) @db.Uuid
+  code        String           @unique
+  name        String
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id    String           @id @default(uuid()) @db.Uuid
+  code  String           @unique
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Restrict)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model LocationGrant {
+  id                  String    @id @default(uuid()) @db.Uuid
+  userId              String    @map("user_id") @db.Uuid
+  locationId          String?   @map("location_id") @db.Uuid
+  scopeMode           ScopeMode @default(LOCATION) @map("scope_mode")
+  inheritDescendants  Boolean   @default(false) @map("inherit_descendants")
+  validFrom           DateTime  @default(now()) @map("valid_from") @db.Timestamptz(6)
+  validUntil          DateTime? @map("valid_until") @db.Timestamptz(6)
+  user                User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  location            Location? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@index([userId, validFrom, validUntil])
+  @@map("location_grants")
+}
+
+model RefreshSession {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  tokenHash   String    @unique @map("token_hash")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  replacedBy  String?   @map("replaced_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt  DateTime? @map("last_used_at") @db.Timestamptz(6)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, expiresAt])
+  @@map("refresh_sessions")
+}
+
+model SecurityAuditEvent {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String?  @map("organization_id") @db.Uuid
+  actorId        String?  @map("actor_id") @db.Uuid
+  action         String
+  outcome        String
+  correlationId  String   @map("correlation_id")
+  metadata       Json?
+  occurredAt     DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  actor          User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, occurredAt])
+  @@index([actorId, occurredAt])
+  @@map("security_audit_events")
+}
